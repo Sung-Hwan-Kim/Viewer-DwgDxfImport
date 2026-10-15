@@ -1,0 +1,11 @@
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+next-env.d.ts
+
+# predev/prebuild 에서 node_modules 로부터 복사되는 산출물
+public/libredwg/
+
+# check-drawing.mjs 가 만드는 임시 컴파일 산출물
+.check-build/
