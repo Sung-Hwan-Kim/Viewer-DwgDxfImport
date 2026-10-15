@@ -180,15 +180,34 @@ scripts/
 - 클리핑 경계가 2048 꼭짓점을 넘으면 삼각형 분할을 포기하고 창 사각형으로
   대신합니다.
 
-## 라이선스 주의
+## 라이선스
+
+이 프로젝트는 **GPL-3.0-only** 입니다. 전문은 [LICENSE](LICENSE) 에 있습니다.
+
+```
+Copyright (C) 2026 Sung-Hwan Kim
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License version 3 as
+published by the Free Software Foundation.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+```
 
 DWG 지원에 쓰는 [`@mlightcad/libredwg-web`](https://github.com/mlightcad/libredwg-web)
-은 **GPL-3.0** 입니다. 이 뷰어를 비공개 소스로 배포할 계획이라면 문제가 될 수
-있습니다. DXF 파서·렌더러는 이 저장소의 자체 구현이고 LibreDWG 에 의존하지 않으므로,
-DWG 지원이 필요 없다면 `lib/dwg/` 와 워커의 동적 import 한 줄만 제거하면 됩니다
-(동적 import 라 DXF 전용 번들에는 애초에 포함되지 않습니다).
+이 **GPL-3.0** 이라, 그것을 함께 배포하는 이상 결과물 전체가 GPL 을 따릅니다.
+저장소 라이선스를 거기에 맞춘 이유입니다. (패키지가 선언한 `GPL-3.0` 은 "이후
+버전도 허용" 여부가 분명하지 않아, 더 좁은 쪽인 `GPL-3.0-only` 로 잡았습니다.)
 
-three.js 는 MIT 입니다.
+DXF 파서·렌더러는 이 저장소의 자체 구현이고 LibreDWG 에 의존하지 않습니다.
+DWG 지원이 필요 없다면 `lib/dwg/` 와 워커의 동적 import 한 줄만 제거하면 GPL
+의존이 사라지고(동적 import 라 DXF 전용 번들에는 애초에 포함되지 않습니다),
+그때는 라이선스를 원하는 대로 다시 고를 수 있습니다.
+
+three.js, Next.js, React 는 MIT 입니다.
 
 ## 참고
 
