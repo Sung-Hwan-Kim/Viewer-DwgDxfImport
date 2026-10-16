@@ -50,6 +50,7 @@ export default function CadViewer() {
   const [showText, setShowText] = useState(true);
   const [showFills, setShowFills] = useState(true);
   const [showHatchPattern, setShowHatchPattern] = useState(true);
+  const [showLineWeights, setShowLineWeights] = useState(true);
   const [paperBorder, setPaperBorder] = useState(true);
   const [hiddenLayers, setHiddenLayers] = useState<Set<string>>(new Set());
 
@@ -144,8 +145,17 @@ export default function CadViewer() {
 
   // ---- three.js 오브젝트 빌드 ----
   const buildOptions = useMemo<Partial<BuildOptions>>(
-    () => ({ style, monochrome, jitter, showText, showFills, showHatchPattern, hiddenLayers }),
-    [style, monochrome, jitter, showText, showFills, showHatchPattern, hiddenLayers],
+    () => ({
+      style,
+      monochrome,
+      jitter,
+      showText,
+      showFills,
+      showHatchPattern,
+      showLineWeights,
+      hiddenLayers,
+    }),
+    [style, monochrome, jitter, showText, showFills, showHatchPattern, showLineWeights, hiddenLayers],
   );
 
   const [object, setObject] = useState<THREE.Object3D | null>(null);
@@ -342,6 +352,14 @@ export default function CadViewer() {
               onChange={(e) => setShowFills(e.target.checked)}
             />
             솔리드 채움 표시
+          </label>
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={showLineWeights}
+              onChange={(e) => setShowLineWeights(e.target.checked)}
+            />
+            선굵기 표시
           </label>
         </section>
 

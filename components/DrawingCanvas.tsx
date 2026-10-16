@@ -84,6 +84,24 @@ const DrawingCanvas = forwardRef<DrawingCanvasHandle, Props>(function DrawingCan
     needsRender.current = true;
   }, []);
 
+  /**
+   * 굵은 선은 LineMaterial 이 셰이더에서 두께를 주는데, 그 계산에 캔버스의
+   * 픽셀 크기가 필요하다. 내용이 바뀌거나 창 크기가 바뀔 때마다 넣어 준다.
+   */
+  const syncLineResolution = useCallback(() => {
+    const content = contentRef.current;
+    if (!content) return;
+    const { w, h } = size.current;
+    content.traverse((obj) => {
+      const mat = (obj as THREE.Mesh).material;
+      for (const m of Array.isArray(mat) ? mat : [mat]) {
+        const lm = m as unknown as { isLineMaterial?: boolean; resolution?: THREE.Vector2 };
+        if (lm?.isLineMaterial && lm.resolution) lm.resolution.set(w, h);
+      }
+    });
+    needsRender.current = true;
+  }, []);
+
   const fit = useCallback(
     (bounds?: Bounds | null) => {
       if (!bounds || !Number.isFinite(bounds.minX)) return;
@@ -176,6 +194,7 @@ const DrawingCanvas = forwardRef<DrawingCanvasHandle, Props>(function DrawingCan
       const h = Math.max(1, Math.floor(rect.height));
       size.current = { w, h };
       renderer.setSize(w, h, false);
+      syncLineResolution();
       // 사용자가 아직 뷰를 움직이지 않았다면 새 크기에 맞춰 다시 맞춘다.
       // (로드 직후 창 크기가 바뀌는 경합을 막는다.)
       if (!userMoved.current && fitBounds.current) fitRef.current?.(fitBounds.current);
@@ -195,7 +214,7 @@ const DrawingCanvas = forwardRef<DrawingCanvasHandle, Props>(function DrawingCan
       sceneRef.current = null;
       cameraRef.current = null;
     };
-  }, [applyCamera]);
+  }, [applyCamera, syncLineResolution]);
 
   // ---- 배경색 ----
   useEffect(() => {
@@ -212,8 +231,9 @@ const DrawingCanvas = forwardRef<DrawingCanvasHandle, Props>(function DrawingCan
     if (contentRef.current) scene.remove(contentRef.current);
     contentRef.current = object;
     if (object) scene.add(object);
+    syncLineResolution();
     needsRender.current = true;
-  }, [object]);
+  }, [object, syncLineResolution]);
 
   // ---- 입력 ----
   useEffect(() => {

@@ -38,6 +38,12 @@ export interface FlatPath {
   layer: string;
   color: number;
   entityType: string;
+  /**
+   * 선굵기, **밀리미터**. DXF 의 370 은 1/100 mm 단위에 음수로 상속 규칙
+   * (-1 BYLAYER, -2 BYBLOCK, -3 기본값)을 섞어 쓰는데, 여기서는 그걸 다 풀어
+   * 실제 굵기만 남긴다. 0 은 "가장 가는 선"(화면에서 1 px)을 뜻한다.
+   */
+  weight: number;
 }
 
 export interface FlatText {
@@ -520,6 +526,31 @@ function layerVisible(ctx: Ctx, name: string): boolean {
   return !layer.off && !layer.frozen;
 }
 
+/** $LWDEFAULT (1/100 mm). 없으면 AutoCAD 기본값 0.25 mm. */
+function defaultLineWeight(ctx: Ctx): number {
+  const h = ctx.doc.header.$LWDEFAULT?.[0];
+  const v = h ? Number(h.value) : Number.NaN;
+  return Number.isFinite(v) && v >= 0 ? v / 100 : 0.25;
+}
+
+/**
+ * 엔티티의 선굵기를 밀리미터로 푼다.
+ *
+ * 370 은 1/100 mm 이고 음수는 상속 규칙이다 — -1 BYLAYER, -2 BYBLOCK,
+ * -3 기본값($LWDEFAULT). inheritedWeight 는 블록을 삽입한 쪽에서 이미 풀린
+ * 굵기(mm)이고, 음수면 "물려받을 것이 없음" 을 뜻한다.
+ */
+function resolveLineWeight(ctx: Ctx, e: DxfEntityBase, inheritedWeight: number): number {
+  const lw = e.lineWeight;
+  if (lw >= 0) return lw / 100;
+  if (lw === -2) return inheritedWeight >= 0 ? inheritedWeight : defaultLineWeight(ctx);
+  if (lw === -1) {
+    const layer = ctx.doc.layers.get(e.layer)?.lineWeight ?? -3;
+    return layer >= 0 ? layer / 100 : defaultLineWeight(ctx);
+  }
+  return defaultLineWeight(ctx);
+}
+
 function lineTypePattern(ctx: Ctx, e: DxfEntityBase): number[] | null {
   if (!ctx.opts.applyLineTypes) return null;
   let name = e.lineType;
@@ -541,6 +572,7 @@ function emitPath(
   m: Mat34,
   color: number,
   closed: boolean,
+  weight: number,
 ) {
   if (coords.length < 6 && !(closed && coords.length >= 6)) {
     if (coords.length < 6) return;
@@ -578,7 +610,7 @@ function emitPath(
       ctx.scene.stats.truncated = true;
       return;
     }
-    ctx.scene.paths.push({ coords: piece, layer: e.layer, color, entityType: e.type });
+    ctx.scene.paths.push({ coords: piece, layer: e.layer, color, entityType: e.type, weight });
     accumulateBounds(ctx.scene, piece);
   }
   ctx.scene.layerCounts[e.layer] = (ctx.scene.layerCounts[e.layer] ?? 0) + 1;
@@ -632,6 +664,8 @@ function flattenEntity(
   depth: number,
   inheritedColor: number,
   inheritedTrueColor: number | undefined,
+  /** 블록을 삽입한 쪽에서 풀린 선굵기(mm). 음수면 물려받을 것이 없다. */
+  inheritedWeight = -1,
 ) {
   if (e.invisible) return;
   if (ctx.modelOnly && e.paperSpace && depth === 0) return;
@@ -640,6 +674,7 @@ function flattenEntity(
 
   ctx.scene.stats.entities++;
   const color = resolveColor(ctx, e, inheritedColor, inheritedTrueColor);
+  const weight = resolveLineWeight(ctx, e, inheritedWeight);
   // 엔티티 자체 좌표계(OCS)를 세계 좌표계로.
   //
   // 주의: 모든 엔티티가 OCS 를 쓰는 건 아니다. LINE·ELLIPSE·SPLINE·3DFACE·
@@ -652,19 +687,19 @@ function flattenEntity(
   switch (e.type) {
     case 'LINE': {
       const l = e;
-      emitPath(ctx, e, [l.start.x, l.start.y, l.start.z, l.end.x, l.end.y, l.end.z], m, color, false);
+      emitPath(ctx, e, [l.start.x, l.start.y, l.start.z, l.end.x, l.end.y, l.end.z], m, color, false, weight);
       break;
     }
     case 'LWPOLYLINE': {
       const p = e as DxfLwPolyline;
-      emitPath(ctx, e, polylineCoords(p.vertices, p.closed), em, color, false);
+      emitPath(ctx, e, polylineCoords(p.vertices, p.closed), em, color, false, weight);
       break;
     }
     case 'POLYLINE': {
       const p = e as DxfPolyline;
       if (p.isMesh) break; // 폴리곤 메시는 스케치 뷰에서 제외
       // 3D 폴리라인의 정점은 WCS 다. 2D 폴리라인만 OCS 를 탄다.
-      emitPath(ctx, e, polylineCoords(p.vertices, p.closed), p.is3d ? m : em, color, false);
+      emitPath(ctx, e, polylineCoords(p.vertices, p.closed), p.is3d ? m : em, color, false, weight);
       break;
     }
     case 'CIRCLE': {
@@ -672,7 +707,7 @@ function flattenEntity(
       if (c.radius <= 0) break;
       const coords = arcPoints(c.center.x, c.center.y, c.radius, 0, Math.PI * 2, segs);
       for (let i = 2; i < coords.length; i += 3) coords[i] = c.center.z;
-      emitPath(ctx, e, coords, em, color, false);
+      emitPath(ctx, e, coords, em, color, false, weight);
       break;
     }
     case 'ARC': {
@@ -687,7 +722,7 @@ function flattenEntity(
         segs,
       );
       for (let i = 2; i < coords.length; i += 3) coords[i] = a.center.z;
-      emitPath(ctx, e, coords, em, color, false);
+      emitPath(ctx, e, coords, em, color, false, weight);
       break;
     }
     case 'ELLIPSE': {
@@ -735,7 +770,7 @@ function flattenEntity(
           el.center.z + ca * uz + sa * vz,
         );
       }
-      emitPath(ctx, e, coords, m, color, false);
+      emitPath(ctx, e, coords, m, color, false, weight);
       break;
     }
     case 'SPLINE': {
@@ -759,7 +794,7 @@ function flattenEntity(
         for (const p of s.controlPoints) coords.push(p.x, p.y, p.z);
       }
       // SPLINE 의 제어점·피팅점도 WCS 다.
-      emitPath(ctx, e, coords, m, color, s.closed);
+      emitPath(ctx, e, coords, m, color, s.closed, weight);
       break;
     }
     case 'POINT': {
@@ -809,7 +844,7 @@ function flattenEntity(
           loopsLocal.push(local);
           // 경계선 자체도 그린다 — 스케치에서는 윤곽이 중요하다.
           flat.push(flat[0], flat[1], flat[2]);
-          ctx.scene.paths.push({ coords: flat, layer: e.layer, color, entityType: 'HATCH' });
+          ctx.scene.paths.push({ coords: flat, layer: e.layer, color, entityType: 'HATCH', weight });
           ctx.segments += flat.length / 3 - 1;
           accumulateBounds(ctx.scene, flat);
         }
@@ -833,7 +868,13 @@ function flattenEntity(
               seg[i + 1] = y;
               seg[i + 2] = z;
             }
-            ctx.scene.paths.push({ coords: seg, layer: e.layer, color, entityType: 'HATCH-PATTERN' });
+            ctx.scene.paths.push({
+              coords: seg,
+              layer: e.layer,
+              color,
+              entityType: 'HATCH-PATTERN',
+              weight,
+            });
             ctx.segments += seg.length / 3 - 1;
             accumulateBounds(ctx.scene, seg);
           }
@@ -847,15 +888,15 @@ function flattenEntity(
       const l = e;
       const coords: number[] = [];
       for (const v of l.vertices) coords.push(v.x, v.y, v.z);
-      emitPath(ctx, e, coords, em, color, false);
+      emitPath(ctx, e, coords, em, color, false, weight);
       break;
     }
     case 'MULTILEADER': {
-      flattenMLeader(ctx, e as DxfMLeader, em, depth, color);
+      flattenMLeader(ctx, e as DxfMLeader, em, depth, color, weight);
       break;
     }
     case 'ACAD_TABLE': {
-      flattenAcadTable(ctx, e as DxfAcadTable, em, depth, color);
+      flattenAcadTable(ctx, e as DxfAcadTable, em, depth, color, weight);
       break;
     }
     case 'RAY':
@@ -881,7 +922,7 @@ function flattenEntity(
       const block = d.blockName ? ctx.doc.blocks.get(d.blockName) : undefined;
       if (block && depth < MAX_BLOCK_DEPTH) {
         for (const child of block.entities) {
-          flattenEntity(ctx, child, em, depth + 1, e.colorIndex, e.trueColor);
+          flattenEntity(ctx, child, em, depth + 1, e.colorIndex, e.trueColor, weight);
         }
       }
       break;
@@ -900,13 +941,13 @@ function flattenEntity(
           const im = multiply(em, insertMatrix(ins, c * ins.columnSpacing, r * ins.rowSpacing));
           const full = multiply(im, toBase);
           for (const child of block.entities) {
-            flattenEntity(ctx, child, full, depth + 1, e.colorIndex, e.trueColor);
+            flattenEntity(ctx, child, full, depth + 1, e.colorIndex, e.trueColor, weight);
             if (ctx.scene.stats.truncated) return;
           }
         }
       }
       for (const attr of ins.attributes) {
-        if (attr.text) flattenEntity(ctx, attr, m, depth + 1, e.colorIndex, e.trueColor);
+        if (attr.text) flattenEntity(ctx, attr, m, depth + 1, e.colorIndex, e.trueColor, weight);
       }
       break;
     }
@@ -982,7 +1023,14 @@ function mleaderBlockMatrix(ml: DxfMLeader): Mat34 {
  * MULTILEADER: 리더선 폴리라인 + 랜딩(수평 꼬리) + 화살촉을 그리고,
  * 콘텐츠로 문자(MTEXT)나 블록을 붙인다.
  */
-function flattenMLeader(ctx: Ctx, ml: DxfMLeader, m: Mat34, depth: number, color: number) {
+function flattenMLeader(
+  ctx: Ctx,
+  ml: DxfMLeader,
+  m: Mat34,
+  depth: number,
+  color: number,
+  weight: number,
+) {
   for (const cluster of ml.leaders) {
     // 같은 다발의 리더선들은 모두 공통 끝점에서 만나 랜딩으로 이어진다.
     const tail: number[] = [];
@@ -1014,12 +1062,12 @@ function flattenMLeader(ctx: Ctx, ml: DxfMLeader, m: Mat34, depth: number, color
         from = 3;
       }
       for (let i = from; i < tail.length; i++) coords.push(tail[i]);
-      emitPath(ctx, ml, coords, m, color, false);
+      emitPath(ctx, ml, coords, m, color, false, weight);
       emitArrowHead(ctx, ml, coords, ml.arrowSize, m, color);
     }
     // 리더선 없이 랜딩만 있는 다발도 꼬리는 그린다.
     if (cluster.lines.length === 0 && tail.length >= 6) {
-      emitPath(ctx, ml, tail, m, color, false);
+      emitPath(ctx, ml, tail, m, color, false, weight);
     }
     if (ctx.scene.stats.truncated) return;
   }
@@ -1052,7 +1100,7 @@ function flattenMLeader(ctx: Ctx, ml: DxfMLeader, m: Mat34, depth: number, color
     translation(-block.basePoint.x, -block.basePoint.y, -block.basePoint.z),
   );
   for (const child of block.entities) {
-    flattenEntity(ctx, child, full, depth + 1, ml.colorIndex, ml.trueColor);
+    flattenEntity(ctx, child, full, depth + 1, ml.colorIndex, ml.trueColor, weight);
     if (ctx.scene.stats.truncated) return;
   }
   // 속성 값은 블록 안 ATTDEF 의 자리에 문자만 바꿔 넣는다.
@@ -1060,7 +1108,7 @@ function flattenMLeader(ctx: Ctx, ml: DxfMLeader, m: Mat34, depth: number, color
     if (!a.text) continue;
     const def = block.attdefs.find((d) => d.handle === a.handle);
     if (!def) continue;
-    flattenEntity(ctx, { ...def, text: a.text }, full, depth + 1, ml.colorIndex, ml.trueColor);
+    flattenEntity(ctx, { ...def, text: a.text }, full, depth + 1, ml.colorIndex, ml.trueColor, weight);
     if (ctx.scene.stats.truncated) return;
   }
 }
@@ -1069,7 +1117,14 @@ function flattenMLeader(ctx: Ctx, ml: DxfMLeader, m: Mat34, depth: number, color
  * ACAD_TABLE: AutoCAD 가 만들어 둔 익명 블록(*T…)을 삽입점에 전개한다.
  * 블록이 없으면 행/열 치수와 셀 문자로 격자를 직접 만든다 (셀 병합은 무시).
  */
-function flattenAcadTable(ctx: Ctx, tb: DxfAcadTable, m: Mat34, depth: number, color: number) {
+function flattenAcadTable(
+  ctx: Ctx,
+  tb: DxfAcadTable,
+  m: Mat34,
+  depth: number,
+  color: number,
+  weight: number,
+) {
   if (depth >= MAX_BLOCK_DEPTH) return;
 
   const angle = Math.atan2(tb.direction.y, tb.direction.x);
@@ -1088,7 +1143,7 @@ function flattenAcadTable(ctx: Ctx, tb: DxfAcadTable, m: Mat34, depth: number, c
       translation(-block.basePoint.x, -block.basePoint.y, -block.basePoint.z),
     );
     for (const child of block.entities) {
-      flattenEntity(ctx, child, full, depth + 1, tb.colorIndex, tb.trueColor);
+      flattenEntity(ctx, child, full, depth + 1, tb.colorIndex, tb.trueColor, weight);
       if (ctx.scene.stats.truncated) return;
     }
     return;
@@ -1107,8 +1162,8 @@ function flattenAcadTable(ctx: Ctx, tb: DxfAcadTable, m: Mat34, depth: number, c
   const height = ys[rows];
   if (Math.abs(width) < 1e-9 || Math.abs(height) < 1e-9) return;
 
-  for (const x of xs) emitPath(ctx, tb, [x, 0, 0, x, height, 0], at, color, false);
-  for (const y of ys) emitPath(ctx, tb, [0, y, 0, width, y, 0], at, color, false);
+  for (const x of xs) emitPath(ctx, tb, [x, 0, 0, x, height, 0], at, color, false, weight);
+  for (const y of ys) emitPath(ctx, tb, [0, y, 0, width, y, 0], at, color, false, weight);
 
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
@@ -1941,6 +1996,7 @@ function emitPaperBorder(ctx: Ctx, layout: DxfLayout) {
     layer: '',
     color: displayHex(8, ctx.opts.darkBackground),
     entityType: 'PAPER',
+    weight: 0,
   });
   ctx.segments += 4;
   accumulateBounds(ctx.scene, coords);

@@ -1,4 +1,7 @@
 import * as THREE from 'three';
+import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js';
+import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js';
+import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeometry.js';
 
 import type { FlatScene } from '../dxf/flatten';
 
@@ -22,6 +25,8 @@ export interface BuildOptions {
   showText: boolean;
   showFills: boolean;
   showHatchPattern: boolean;
+  /** 선굵기(LWDISPLAY)를 반영할지. 끄면 모두 1 px 로 그린다. */
+  showLineWeights: boolean;
 }
 
 export interface StyleTokens {
@@ -49,6 +54,7 @@ export const DEFAULT_BUILD_OPTIONS: BuildOptions = {
   showText: true,
   showFills: true,
   showHatchPattern: true,
+  showLineWeights: true,
 };
 
 export interface BuiltScene {
@@ -187,6 +193,23 @@ function textCache(): TextTextureCache {
   return sharedTextCache;
 }
 
+/**
+ * 선굵기를 화면 픽셀로 바꾸는 비율 (96 DPI 기준 1 mm).
+ *
+ * AutoCAD 와 같은 규칙이다 — 선굵기는 종이 위의 밀리미터라서 줌을 해도
+ * 화면에서 굵기가 변하지 않는다. 그래서 도면 단위가 아니라 픽셀로 그린다.
+ */
+const PX_PER_MM = 96 / 25.4;
+
+/** 이보다 가는 선은 굵기를 따지지 않고 보통 1 px 선으로 그린다. */
+const THIN_PX = 1.3;
+
+/**
+ * 굵은 선 상한. 굵은 선은 선분마다 사각형(삼각형 12개)을 만들어 그리므로
+ * 1 px 선보다 훨씬 비싸다. 넘으면 전부 1 px 로 떨어뜨린다.
+ */
+const MAX_FAT_SEGMENTS = 200_000;
+
 // ------------------------------------------------------------------- 빌더
 
 function inkFor(color: number, tokens: StyleTokens, monochrome: boolean): number {
@@ -215,18 +238,26 @@ export function buildSketchScene(
   const diag = b ? Math.hypot(b.maxX - b.minX, b.maxY - b.minY) : 1;
   const amplitude = opts.style === 'sketch' ? (diag * 0.0009 * opts.jitter) : 0;
 
-  // ---- 선: 색깔별로 모은다 ----
-  const byColor = new Map<number, number[]>();
+  // ---- 선: 색 + 굵기별로 모은다 ----
+  const buckets = new Map<string, { color: number; widthPx: number; coords: number[] }>();
 
   for (const path of scene.paths) {
     if (opts.hiddenLayers.has(path.layer)) continue;
     if (!opts.showHatchPattern && path.entityType === 'HATCH-PATTERN') continue;
 
     const color = inkFor(path.color, tokens, opts.monochrome);
-    let bucket = byColor.get(color);
+    // 굵기는 0.25 px 단위로 묶는다 — 버킷(=드로우 콜)이 무한정 늘지 않게.
+    let widthPx = 0;
+    if (opts.showLineWeights) {
+      const px = path.weight * PX_PER_MM;
+      if (px > THIN_PX) widthPx = Math.round(px * 4) / 4;
+    }
+
+    const key = `${color}|${widthPx}`;
+    let bucket = buckets.get(key);
     if (!bucket) {
-      bucket = [];
-      byColor.set(color, bucket);
+      bucket = { color, widthPx, coords: [] };
+      buckets.set(key, bucket);
     }
 
     for (let pass = 0; pass < tokens.strokes; pass++) {
@@ -234,7 +265,7 @@ export function buildSketchScene(
         amplitude > 0 ? jitterPath(path.coords, amplitude, pass * 7919 + 13) : path.coords;
       // 폴리라인 → 선분 쌍
       for (let i = 0; i + 5 < coords.length; i += 3) {
-        bucket.push(
+        bucket.coords.push(
           coords[i], coords[i + 1], coords[i + 2],
           coords[i + 3], coords[i + 4], coords[i + 5],
         );
@@ -243,12 +274,44 @@ export function buildSketchScene(
     }
   }
 
-  for (const [color, coords] of byColor) {
-    if (coords.length === 0) continue;
+  let fatSegments = 0;
+  for (const bucket of buckets.values()) {
+    if (bucket.widthPx > 0) fatSegments += bucket.coords.length / 6;
+  }
+  const drawFat = fatSegments <= MAX_FAT_SEGMENTS;
+
+  for (const bucket of buckets.values()) {
+    if (bucket.coords.length === 0) continue;
+
+    if (bucket.widthPx > 0 && drawFat) {
+      // WebGL 은 LineBasicMaterial.linewidth 를 무시한다(항상 1 px). 굵은 선은
+      // 선분마다 사각형을 만들어 셰이더에서 두께를 주는 LineSegments2 로 그린다.
+      const geometry = new LineSegmentsGeometry();
+      geometry.setPositions(bucket.coords);
+      const material = new LineMaterial({
+        color: bucket.color,
+        linewidth: bucket.widthPx, // worldUnits 가 false 라 픽셀 단위
+        worldUnits: false,
+        transparent: tokens.lineOpacity < 1,
+        opacity: tokens.lineOpacity,
+        depthTest: false,
+      });
+      // 두께 계산에 캔버스 크기가 필요하다. 실제 값은 DrawingCanvas 가 넣어 준다.
+      if (typeof window !== 'undefined') {
+        material.resolution.set(window.innerWidth || 1, window.innerHeight || 1);
+      }
+      const lines = new LineSegments2(geometry, material);
+      lines.renderOrder = 2;
+      lines.frustumCulled = false;
+      group.add(lines);
+      disposables.push(geometry, material);
+      continue;
+    }
+
     const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute('position', new THREE.Float32BufferAttribute(coords, 3));
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(bucket.coords, 3));
     const material = new THREE.LineBasicMaterial({
-      color,
+      color: bucket.color,
       transparent: tokens.lineOpacity < 1,
       opacity: tokens.lineOpacity,
       depthTest: false,
