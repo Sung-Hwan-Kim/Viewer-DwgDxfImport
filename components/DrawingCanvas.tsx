@@ -1,5 +1,6 @@
 'use client';
 
+import { Canvas, useThree } from '@react-three/fiber';
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef } from 'react';
 import * as THREE from 'three';
 
@@ -34,20 +35,48 @@ interface Props {
 const MIN_UPP = 1e-7;
 const MAX_UPP = 1e9;
 
-const DrawingCanvas = forwardRef<DrawingCanvasHandle, Props>(function DrawingCanvas(
-  { object, background, onCursor, onViewChange },
-  ref,
-) {
-  const hostRef = useRef<HTMLDivElement>(null);
-  const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
-  const sceneRef = useRef<THREE.Scene | null>(null);
-  const cameraRef = useRef<THREE.OrthographicCamera | null>(null);
-  const contentRef = useRef<THREE.Object3D | null>(null);
+/**
+ * 굵은 선은 LineMaterial 이 셰이더에서 두께를 주는데, 그 계산에 캔버스의
+ * 픽셀 크기가 필요하다. 내용이 바뀌거나 창 크기가 바뀔 때마다 넣어 준다.
+ */
+function syncLineResolution(root: THREE.Object3D | null, w: number, h: number) {
+  if (!root) return;
+  root.traverse((obj) => {
+    const mat = (obj as THREE.Mesh).material;
+    for (const m of Array.isArray(mat) ? mat : [mat]) {
+      const lm = m as unknown as { isLineMaterial?: boolean; resolution?: THREE.Vector2 };
+      if (lm?.isLineMaterial && lm.resolution) lm.resolution.set(w, h);
+    }
+  });
+}
+
+/**
+ * 카메라와 마우스 조작을 맡는다.
+ *
+ * `<Canvas>` 안에서만 쓸 수 있다 — 카메라·렌더러·캔버스 크기를 `useThree` 로
+ * 받아 쓴다. 2D 도면이라 직교 카메라의 프러스텀을 직접 계산하므로, R3F 가
+ * 창 크기에 맞춰 프러스텀을 덮어쓰지 않도록 카메라에 `manual` 을 세워 둔다.
+ */
+interface ViewControllerProps {
+  object: THREE.Object3D | null;
+  onCursor?: (x: number, y: number) => void;
+  onViewChange?: (unitsPerPixel: number) => void;
+  /** 바깥(<Canvas> 밖)에서 쓸 조작을 넘겨준다. 떼어낼 때는 null 로 부른다. */
+  onReady: (api: DrawingCanvasHandle | null) => void;
+}
+
+function ViewController({ object, onCursor, onViewChange, onReady }: ViewControllerProps) {
+  const camera = useThree((s) => s.camera) as THREE.OrthographicCamera;
+  const gl = useThree((s) => s.gl);
+  const scene = useThree((s) => s.scene);
+  const invalidate = useThree((s) => s.invalidate);
+  const width = useThree((s) => s.size.width);
+  const height = useThree((s) => s.size.height);
 
   /** 화면 중심의 도면 좌표와 픽셀당 도면 단위 — 뷰 상태 전부. */
   const view = useRef({ cx: 0, cy: 0, upp: 1 });
+  /** 캔버스 크기. 핸들러 안에서 최신 값이 필요해 ref 로도 들고 있는다. */
   const size = useRef({ w: 1, h: 1 });
-  const needsRender = useRef(true);
   /** 마지막으로 맞춘 도면 범위. 사용자가 뷰를 건드리기 전까지 리사이즈 때 다시 맞춘다. */
   const fitBounds = useRef<Bounds | null>(null);
   const userMoved = useRef(false);
@@ -71,36 +100,16 @@ const DrawingCanvas = forwardRef<DrawingCanvasHandle, Props>(function DrawingCan
   });
 
   const applyCamera = useCallback(() => {
-    const cam = cameraRef.current;
-    if (!cam) return;
     const { cx, cy, upp } = view.current;
     const halfW = (size.current.w * upp) / 2;
     const halfH = (size.current.h * upp) / 2;
-    cam.left = cx - halfW;
-    cam.right = cx + halfW;
-    cam.top = cy + halfH;
-    cam.bottom = cy - halfH;
-    cam.updateProjectionMatrix();
-    needsRender.current = true;
-  }, []);
-
-  /**
-   * 굵은 선은 LineMaterial 이 셰이더에서 두께를 주는데, 그 계산에 캔버스의
-   * 픽셀 크기가 필요하다. 내용이 바뀌거나 창 크기가 바뀔 때마다 넣어 준다.
-   */
-  const syncLineResolution = useCallback(() => {
-    const content = contentRef.current;
-    if (!content) return;
-    const { w, h } = size.current;
-    content.traverse((obj) => {
-      const mat = (obj as THREE.Mesh).material;
-      for (const m of Array.isArray(mat) ? mat : [mat]) {
-        const lm = m as unknown as { isLineMaterial?: boolean; resolution?: THREE.Vector2 };
-        if (lm?.isLineMaterial && lm.resolution) lm.resolution.set(w, h);
-      }
-    });
-    needsRender.current = true;
-  }, []);
+    camera.left = cx - halfW;
+    camera.right = cx + halfW;
+    camera.top = cy + halfH;
+    camera.bottom = cy - halfH;
+    camera.updateProjectionMatrix();
+    invalidate();
+  }, [camera, invalidate]);
 
   const fit = useCallback(
     (bounds?: Bounds | null) => {
@@ -117,128 +126,47 @@ const DrawingCanvas = forwardRef<DrawingCanvasHandle, Props>(function DrawingCan
         Math.max(w / Math.max(size.current.w, 1), h / Math.max(size.current.h, 1)) * pad,
       );
       applyCamera();
-      onViewChange?.(view.current.upp);
+      onViewChangeRef.current?.(view.current.upp);
     },
-    [applyCamera, onViewChange],
+    [applyCamera],
   );
 
-  // 리사이즈 핸들러가 최신 fit 을 쓰되, 그 때문에 렌더러를 다시 만들지는 않게 한다.
-  const fitRef = useRef(fit);
+  // ---- 캔버스 크기 ----
   useEffect(() => {
-    fitRef.current = fit;
-  }, [fit]);
+    // R3F 가 창 크기에 맞춰 프러스텀을 덮어쓰지 않게 한다.
+    (camera as THREE.OrthographicCamera & { manual?: boolean }).manual = true;
+    size.current = { w: Math.max(1, width), h: Math.max(1, height) };
+    syncLineResolution(object, size.current.w, size.current.h);
+    // 사용자가 아직 뷰를 움직이지 않았다면 새 크기에 맞춰 다시 맞춘다.
+    // (로드 직후 창 크기가 바뀌는 경합을 막는다.)
+    if (!userMoved.current && fitBounds.current) fit(fitBounds.current);
+    else applyCamera();
+  }, [camera, width, height, object, fit, applyCamera]);
 
-  useImperativeHandle(
-    ref,
-    (): DrawingCanvasHandle => ({
+  // ---- 바깥에서 쓸 수 있는 조작들 ----
+  useEffect(() => {
+    const api: DrawingCanvasHandle = {
       fit,
       zoomBy: (factor) => {
         userMoved.current = true;
         view.current.upp = Math.min(MAX_UPP, Math.max(MIN_UPP, view.current.upp / factor));
         applyCamera();
-        onViewChange?.(view.current.upp);
+        onViewChangeRef.current?.(view.current.upp);
       },
       unitsPerPixel: () => view.current.upp,
       toPNG: () => {
-        const r = rendererRef.current;
-        const s = sceneRef.current;
-        const c = cameraRef.current;
-        if (!r || !s || !c) return null;
-        // preserveDrawingBuffer 를 켜지 않았으므로 직전에 한 번 더 그린다.
-        r.render(s, c);
-        return r.domElement.toDataURL('image/png');
+        // 요청이 있을 때만 그리는(frameloop="demand") 설정이라 직전에 한 번 더 그린다.
+        gl.render(scene, camera);
+        return gl.domElement.toDataURL('image/png');
       },
-    }),
-    [applyCamera, fit, onViewChange],
-  );
-
-  // ---- 초기화 ----
-  useEffect(() => {
-    const host = hostRef.current;
-    if (!host) return;
-
-    const renderer = new THREE.WebGLRenderer({
-      antialias: true,
-      alpha: false,
-      preserveDrawingBuffer: true,
-    });
-    // 뷰포트 안 문자를 창 모양으로 자르려면 머티리얼별 클리핑이 필요하다.
-    renderer.localClippingEnabled = true;
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-    host.appendChild(renderer.domElement);
-    renderer.domElement.style.display = 'block';
-    renderer.domElement.style.width = '100%';
-    renderer.domElement.style.height = '100%';
-
-    const scene = new THREE.Scene();
-    const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, -10000, 10000);
-    camera.position.set(0, 0, 100);
-    camera.lookAt(0, 0, 0);
-
-    rendererRef.current = renderer;
-    sceneRef.current = scene;
-    cameraRef.current = camera;
-
-    let raf = 0;
-    const loop = () => {
-      raf = requestAnimationFrame(loop);
-      if (!needsRender.current) return;
-      needsRender.current = false;
-      renderer.render(scene, camera);
     };
-    raf = requestAnimationFrame(loop);
-
-    const resize = () => {
-      const rect = host.getBoundingClientRect();
-      const w = Math.max(1, Math.floor(rect.width));
-      const h = Math.max(1, Math.floor(rect.height));
-      size.current = { w, h };
-      renderer.setSize(w, h, false);
-      syncLineResolution();
-      // 사용자가 아직 뷰를 움직이지 않았다면 새 크기에 맞춰 다시 맞춘다.
-      // (로드 직후 창 크기가 바뀌는 경합을 막는다.)
-      if (!userMoved.current && fitBounds.current) fitRef.current?.(fitBounds.current);
-      else applyCamera();
-    };
-    resize();
-
-    const observer = new ResizeObserver(resize);
-    observer.observe(host);
-
-    return () => {
-      cancelAnimationFrame(raf);
-      observer.disconnect();
-      renderer.dispose();
-      if (renderer.domElement.parentNode === host) host.removeChild(renderer.domElement);
-      rendererRef.current = null;
-      sceneRef.current = null;
-      cameraRef.current = null;
-    };
-  }, [applyCamera, syncLineResolution]);
-
-  // ---- 배경색 ----
-  useEffect(() => {
-    const scene = sceneRef.current;
-    if (!scene) return;
-    scene.background = new THREE.Color(background);
-    needsRender.current = true;
-  }, [background]);
-
-  // ---- 콘텐츠 교체 ----
-  useEffect(() => {
-    const scene = sceneRef.current;
-    if (!scene) return;
-    if (contentRef.current) scene.remove(contentRef.current);
-    contentRef.current = object;
-    if (object) scene.add(object);
-    syncLineResolution();
-    needsRender.current = true;
-  }, [object, syncLineResolution]);
+    onReady(api);
+    return () => onReady(null);
+  }, [fit, applyCamera, gl, scene, camera, onReady]);
 
   // ---- 입력 ----
   useEffect(() => {
-    const host = hostRef.current;
-    if (!host) return;
+    const host = gl.domElement;
 
     const toWorld = (clientX: number, clientY: number) => {
       const rect = host.getBoundingClientRect();
@@ -329,9 +257,73 @@ const DrawingCanvas = forwardRef<DrawingCanvasHandle, Props>(function DrawingCan
       host.removeEventListener('contextmenu', onContextMenu);
     };
     // applyCamera 는 고정이라 이 효과는 한 번만 돈다 — 콜백은 위의 ref 로 받는다.
-  }, [applyCamera]);
+  }, [applyCamera, gl]);
 
-  return <div ref={hostRef} className="canvas-host" />;
+  return null;
+}
+
+const DrawingCanvas = forwardRef<DrawingCanvasHandle, Props>(function DrawingCanvas(
+  { object, background, onCursor, onViewChange },
+  ref,
+) {
+  /** <Canvas> 안쪽에서 등록해 주는 실제 조작들. */
+  const inner = useRef<DrawingCanvasHandle | null>(null);
+  /**
+   * R3F 는 캔버스 크기를 잡은 뒤에야 자식을 붙이므로, 그 전에 들어온 fit 요청을
+   * 받아 두었다가 준비되면 흘려보낸다. (도면을 열자마자 fit 이 날아온다.)
+   */
+  const pendingFit = useRef<Bounds | null | undefined>(undefined);
+
+  const onReady = useCallback((api: DrawingCanvasHandle | null) => {
+    inner.current = api;
+    if (api && pendingFit.current !== undefined) {
+      api.fit(pendingFit.current);
+      pendingFit.current = undefined;
+    }
+  }, []);
+
+  useImperativeHandle(
+    ref,
+    (): DrawingCanvasHandle => ({
+      fit: (bounds) => {
+        if (inner.current) inner.current.fit(bounds);
+        else pendingFit.current = bounds ?? null;
+      },
+      zoomBy: (factor) => inner.current?.zoomBy(factor),
+      unitsPerPixel: () => inner.current?.unitsPerPixel() ?? 1,
+      toPNG: () => inner.current?.toPNG() ?? null,
+    }),
+    [],
+  );
+
+  return (
+    <div className="canvas-host">
+      <Canvas
+        orthographic
+        // 바뀔 때만 그린다 — 가만히 있는 도면에 GPU 를 쓰지 않는다.
+        frameloop="demand"
+        dpr={[1, 2]}
+        gl={{ antialias: true, alpha: false, preserveDrawingBuffer: true }}
+        camera={{ manual: true, position: [0, 0, 100], near: -10000, far: 10000 }}
+        onCreated={({ gl }) => {
+          // 뷰포트 안 문자를 창 모양으로 자르려면 머티리얼별 클리핑이 필요하다.
+          gl.localClippingEnabled = true;
+        }}
+      >
+        <color attach="background" args={[background]} />
+        <ViewController
+          object={object}
+          onCursor={onCursor}
+          onViewChange={onViewChange}
+          onReady={onReady}
+        />
+        {/* 선·면·문자는 평탄화 결과로 한 번에 만들어 둔 그룹이라 통째로 붙인다.
+            수십만 선분을 JSX 로 쪼개면 재조정 비용만 늘고 얻는 게 없다.
+            수명은 만든 쪽(CadViewer)이 쥐고 있으므로 R3F 가 버리지 않게 한다. */}
+        {object && <primitive object={object} dispose={null} />}
+      </Canvas>
+    </div>
+  );
 });
 
 export default DrawingCanvas;

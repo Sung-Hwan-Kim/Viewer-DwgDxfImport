@@ -1,6 +1,6 @@
 # DWG / DXF 스케치 뷰어
 
-Next.js + three.js 로 만든 2D CAD 도면 웹 뷰어입니다. 브라우저에서 DXF/DWG 파일을
+Next.js + React Three Fiber(three.js) 로 만든 2D CAD 도면 웹 뷰어입니다. 브라우저에서 DXF/DWG 파일을
 직접 읽어 선 도면(스케치)으로 그립니다. 서버로 파일을 올리지 않습니다 — 파싱과
 렌더링이 전부 브라우저 안에서 끝납니다.
 
@@ -153,7 +153,7 @@ node scripts/check-drawing.mjs <파일경로> [--dump-dxf 변환결과.dxf] [--s
 app/                 Next.js App Router (서버 렌더는 껍데기만)
 components/
   CadViewer.tsx      상태·워커·패널 오케스트레이션
-  DrawingCanvas.tsx  three.js 캔버스와 2D 팬/줌 (직교 카메라)
+  DrawingCanvas.tsx  R3F <Canvas> 와 2D 팬/줌 (직교 카메라, on-demand 렌더)
   LayerPanel.tsx     레이어 목록
 lib/
   dxf/
@@ -177,8 +177,16 @@ scripts/
 알지 못하므로 분기가 한 곳(`lib/worker/parse.worker.ts`)뿐입니다.
 
 파싱과 평탄화는 Web Worker 에서 돌아가 큰 도면을 열어도 UI 가 멈추지 않습니다.
-선은 색깔별로 하나의 `LineSegments` 로 합쳐 드로우 콜을 줄이고, 화면은 변화가
-있을 때만 다시 그립니다(on-demand rendering).
+선은 색·굵기별로 하나의 `LineSegments` 로 합쳐 드로우 콜을 줄이고, 화면은 변화가
+있을 때만 다시 그립니다(R3F `frameloop="demand"`).
+
+화면 쪽은 **React Three Fiber** 를 씁니다. 캔버스·렌더 루프·직교 카메라·마우스
+조작이 `<Canvas>` 와 `useThree` 위에 올라가 있습니다. 다만 평탄화 결과로 만든
+선·면·문자 묶음은 `buildSketchScene()` 이 한 번에 만든 `THREE.Group` 을
+`<primitive>` 로 통째로 붙입니다 — 수십만 선분과 수천 개의 문자 평면을 JSX 로
+쪼개면 재조정 비용만 늘고 얻는 것이 없기 때문입니다. 2D 도면이라 직교 카메라의
+프러스텀을 직접 계산하므로 카메라에 `manual` 을 세워 R3F 가 창 크기에 맞춰
+덮어쓰지 않게 합니다.
 
 ## 성능 안전장치
 
@@ -216,7 +224,7 @@ DWG 지원이 필요 없다면 `lib/dwg/` 와 워커의 동적 import 한 줄만
 의존이 사라지고(동적 import 라 DXF 전용 번들에는 애초에 포함되지 않습니다),
 그때는 라이선스를 원하는 대로 다시 고를 수 있습니다.
 
-three.js, Next.js, React 는 MIT 입니다.
+three.js, React Three Fiber, Next.js, React 는 MIT 입니다.
 
 ## 참고
 
